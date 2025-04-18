@@ -1,0 +1,46 @@
+{
+  "name": "@amyseer/moveflow-aptos-mcp-server",
+  "version": "1.0.6",
+  "type": "module",
+  "description": "MoveFlow Aptos MCP Server for AI assistants to interact with MoveFlow protocol on Aptos blockchain",
+  "main": "build/index.js",
+  "bin": {
+    "moveflow-aptos-mcp": "./bin/cli.js"
+  },
+  "files": [
+    "build",
+    "bin",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "start": "node build/index.js",
+    "dev": "tsc -w & node --watch build/index.js",
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.7.0",
+    "@moveflow/aptos-sdk": "^0.0.12",
+    "dotenv": "^16.4.0",
+    "zod": "^3.22.4"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.6",
+    "typescript": "^5.3.3"
+  },
+  "keywords": [
+    "mcp",
+    "aptos",
+    "blockchain",
+    "moveflow",
+    "ai",
+    "claude",
+    "assistant"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  }
+}
