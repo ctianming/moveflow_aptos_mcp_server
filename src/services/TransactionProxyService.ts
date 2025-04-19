@@ -1,4 +1,4 @@
-import { aptos } from "@moveflow/aptos-sdk";
+import { SimpleTransaction } from "@aptos-labs/ts-sdk";
 
 /**
  * 交易代理服务 - 负责与客户端通信以处理签名请求
@@ -7,7 +7,7 @@ import { aptos } from "@moveflow/aptos-sdk";
 export class TransactionProxyService {
     // 存储待签名交易的队列
     private pendingTransactions: Map<string, {
-        transaction: aptos.SimpleTransaction,
+        transaction: SimpleTransaction,
         resolver: Function,
         timestamp: number
     }> = new Map();
@@ -22,7 +22,7 @@ export class TransactionProxyService {
      * @param transaction 未签名的交易对象
      * @returns 包含交易ID的对象，客户端需要使用此ID提交签名后的交易
      */
-    async submitTransaction(transaction: aptos.SimpleTransaction): Promise<{
+    async submitTransaction(transaction: SimpleTransaction): Promise<{
         transactionId: string,
         payload: any,
         expiresAt: number
@@ -78,13 +78,6 @@ export class TransactionProxyService {
         if (!pendingTx) {
             return { success: false, error: "Transaction data not available" };
         }
-
-        if (!signedTransaction.signature || !signedTransaction.public_key || !signedTransaction.sender) {
-            return { success: false, error: "Invalid signed transaction data: missing signature, public key, or sender." };
-        }
-
-        console.log(`Processing signed transaction for ID: ${transactionId}`);
-        console.log(`Signed data:`, signedTransaction);
 
         // 删除挂起的交易
         this.pendingTransactions.delete(transactionId);

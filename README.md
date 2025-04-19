@@ -16,10 +16,16 @@ A Model Context Protocol (MCP) server that enables AI assistants to interact wit
   - Create multiple streams at once
   - Withdraw from multiple streams simultaneously
 
-- **MCP Tool Discovery**
+- **MCP Integration**
+  - Full Model Context Protocol (MCP) compatibility
   - Automatic tool discovery through MCP capability interface
   - Standardized input schema validation
   - Self-documenting API
+
+- **Security**
+  - Client-side signing support for secure transaction handling
+  - Read-only mode for safe data queries
+  - Direct signing mode for development and testing
 
 ## Available MCP Tools
 
@@ -47,6 +53,49 @@ The MoveFlow Aptos MCP server also provides access to blockchain resources:
 | `moveflow://streams/{streamId}` | Retrieves detailed information about a specific stream |
 
 These resources can be accessed directly by AI assistants supporting the MCP protocol, providing contextual information without requiring explicit tool calls.
+
+## Installation and Setup
+
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/moveflow/moveflow-aptos-mcp-server.git
+   cd moveflow_aptos_mcp_server
+   ```
+
+2. Install dependencies:
+   ```bash
+   npm install
+   ```
+
+3. Build the project:
+   ```bash
+   npm run build
+   ```
+
+4. Start the server:
+   ```bash
+   APTOS_NODE_URL="https://fullnode.mainnet.aptoslabs.com/v1" \
+   APTOS_NETWORK="mainnet" \
+   READ_ONLY_MODE="true" \
+   node build/index.js
+   ```
+
+5. Verify the server is running:
+   You should see the following output:
+   ```
+   Starting MoveFlow Aptos MCP Server...
+   Initialized Stream with read-only mode
+   MoveFlow Aptos MCP Server tools registered
+   MoveFlow Aptos MCP Server started
+   ```
+
+### Installation via NPM Package
+
+You can also install and use the server as an NPM package:
+
+```bash
+npm install @moveflow/aptos-mcp-server
+```
 
 ## AI Assistant Integration
 
@@ -87,8 +136,9 @@ npx @moveflow/aptos-mcp-server
 
 # Run with custom environment variables
 npx @moveflow/aptos-mcp-server --env.APTOS_NETWORK=testnet --env.READ_ONLY_MODE=true
+```
 
-# For Claude Desktop integration:
+For Claude Desktop integration with NPX:
 ```json
 {
   "mcpServers": {
@@ -166,22 +216,6 @@ await client.connect(transport);
      }
      ```
 
-     **Note for VS Code Settings Configuration**:
-     If you're configuring directly in VS Code settings instead of using the Cline MCP directory, use the following format:
-     ```json
-     {
-       "mcpServers": {
-         "moveflow-aptos": {
-           "command": "node",
-           "args": ["/home/amyseer/AI/mcp/mcp_servers/moveflow_aptos_mcp_server/build/index.js"],
-           "env": {},
-           "disabled": false,
-           "autoApprove": []
-         }
-       }
-     }
-     ```
-
    - **Method 2**: Use Cline's natural language configuration
      In Cline, type:
      ```
@@ -206,7 +240,7 @@ await client.connect(transport);
 
 ⚠️ **Security Note**: Cline has its own security mechanisms and will ask for your permission before executing any operations. Nevertheless, it's recommended to follow the private key security best practices outlined in this document.
 
-## Security Considerations - Security Architecture
+## Security Architecture
 
 This server implements a security architecture that eliminates private key storage:
 
@@ -215,7 +249,7 @@ This server implements a security architecture that eliminates private key stora
 The server has been designed to completely avoid storing private keys:
 
 1. **Read-Only Mode**: 
-   - Default mode of operation
+   - Default recommended mode of operation
    - Only allows querying blockchain data
    - Cannot execute any transactions
    - Enable with `READ_ONLY_MODE="true"`
@@ -226,49 +260,31 @@ The server has been designed to completely avoid storing private keys:
    - Transactions must be signed by client applications
    - Provides enhanced security by separating transaction preparation from signing
 
+3. **Direct Signing Mode (For Development)**:
+   - When `SIGNING_MODE` is set to "direct" and `APTOS_PRIVATE_KEY` is provided
+   - Server uses the provided private key to sign and submit transactions
+   - Less secure but convenient for testing
+   - Not recommended for production use
+
 ### Secure Transaction Architecture
 
-The new architecture separates responsibility:
+The server architecture separates responsibilities:
 - Server: Validates inputs and prepares transaction objects
 - Client: Manages private keys and signs transactions 
 - API/Connector: Handles communication between server and client
 
 This design eliminates the need for private key handling in the server process, making it significantly more secure for production use.
 
-## Installation and Setup
+## Testing MCP Tools
 
-1. Clone the repository:
-   ```bash
-   git clone <repository-url>
-   cd moveflow_aptos_mcp_server
-   ```
+The server includes a test script to verify all MCP tools are working correctly:
 
-2. Install dependencies:
-   ```bash
-   npm install
-   ```
+```bash
+# Run the test script
+npm run test-tools
+```
 
-3. Build the project:
-   ```bash
-   npm run build
-   ```
-
-4. Start the server:
-   ```bash
-   APTOS_NODE_URL="https://fullnode.mainnet.aptoslabs.com/v1" \
-   APTOS_NETWORK="mainnet" \
-   READ_ONLY_MODE="true" \
-   node build/index.js
-   ```
-
-5. Verify the server is running:
-   You should see the following output:
-   ```
-   Starting MoveFlow Aptos MCP Server...
-   Initialized Stream with read-only mode
-   MoveFlow Aptos MCP Server tools registered
-   MoveFlow Aptos MCP Server started
-   ```
+This will execute a series of tests for each MCP tool to verify proper functionality. You can also configure the test script to use different networks or signing modes by editing the configuration in `test-tools.js`.
 
 ## Configuration Reference
 
@@ -291,6 +307,47 @@ This design eliminates the need for private key handling in the server process, 
 - **Transaction Modes**: When `READ_ONLY_MODE` is set to "false", the server can operate in two modes:
   - **Client-Side Signing Mode** (Default): When `SIGNING_MODE` is set to "client" or omitted. Server prepares transactions but doesn't sign them. Transactions must be signed by client applications.
   - **Direct Signing Mode**: When `SIGNING_MODE` is set to "direct" and `APTOS_PRIVATE_KEY` is provided. Server uses the provided private key to sign and submit transactions directly. This mode is less secure but more convenient for testing and development.
+
+## Development
+
+### Project Structure
+
+The server codebase is organized as follows:
+
+```
+moveflow_aptos_mcp_server/
+├── src/                    # Source code
+│   ├── tools.ts            # MCP tool implementations
+│   ├── resources.ts        # MCP resource implementations
+│   ├── adapters.ts         # Adapters for Aptos SDK
+│   ├── aptos.ts            # Aptos blockchain interactions
+│   ├── config.ts           # Configuration handling
+│   ├── index.ts            # Main server entry point
+│   ├── utils.ts            # Utility functions
+│   └── services/           # Service implementations
+│       ├── TransactionSigningService.ts
+│       ├── ClientProvidedSigningService.ts
+│       └── TransactionProxyService.ts
+├── build/                  # Compiled JavaScript
+├── bin/                    # CLI tools
+│   └── cli.js              # CLI entry point
+└── test-tools.js           # Tools testing script
+```
+
+### Building From Source
+
+To build the server from source:
+
+```bash
+# Install dependencies
+npm install
+
+# Build TypeScript
+npm run build
+
+# Optionally run tests
+npm run test-tools
+```
 
 ## License
 

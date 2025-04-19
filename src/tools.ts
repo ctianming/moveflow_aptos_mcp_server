@@ -1,6 +1,6 @@
 import { z } from "zod";
-import { getStreamInstance, getSigningService, getSignerAccount } from "./aptos.js";
-import { aptos } from "@moveflow/aptos-sdk";
+import { AccountAddress, AccountAddress as NewAccountAddress } from "@aptos-labs/ts-sdk";
+import { getStreamInstance } from "./aptos.js";
 import {
     CreateStreamParams,
     StreamOperateParams,
@@ -10,44 +10,106 @@ import {
     StreamType,
     OperateType
 } from "@moveflow/aptos-sdk";
+import { aptos } from "@moveflow/aptos-sdk";
+import { getConfig, getTransactionExecutorConfig } from "./config.js";
+import { helper } from "@moveflow/aptos-sdk";
 import { canExecuteTransaction } from "./utils.js";
-import { transactionTools } from "./tools/transactionTools.js";
 
-// Helper function to format blockchain transaction responses in MCP format
-function formatTransactionResponse(response: any): any {
-    if (!response) return {
-        content: [{ type: "text", text: "No response received" }],
-        isError: true
+// 增强版交易响应格式化函数
+function formatTransactionResponse(response: any, params?: any): any {
+    const baseResponse = {
+        success: !!response,
+        timestamp: new Date().toISOString(),
+        metadata: {
+            network: getConfig().aptosNetwork,
+            gasEstimate: response?.gasUsed || 0,
+            transactionType: 'stream_create'
+        }
     };
 
-    // If this is just a transaction object (not executed), return a message
-    if (response.clientSigningRequired) {
+    if (!response) {
         return {
+            ...baseResponse,
             content: [{
                 type: "text",
-                text: `Transaction created but not executed. Use the submit-signed-transaction tool with ID: ${response.transactionId}`
+                text: "❌ 交易创建失败：未收到有效响应",
+                annotations: ["critical"]
+            }],
+            isError: true
+        };
+    }
+
+    // 未执行的交易预览
+    if (response.data && !response.hash) {
+        return {
+            ...baseResponse,
+            content: [{
+                type: "text",
+                text: JSON.stringify({
+                    status: "pending",
+                    message: "✅ 交易已创建但未执行 (设置 execute: true 提交到链上)",
+                    preview: {
+                        streamName: params?.name,
+                        recipient: params?.recipient?.toString(),
+                        totalAmount: params?.deposit_amount?.toString() + ' APT',
+                        duration: `${(params?.stop_time - params?.start_time) / 86400} 天`,
+                        autoWithdraw: params?.auto_withdraw ? '启用' : '禁用',
+                        gasEstimate: `${baseResponse.metadata.gasEstimate} gas单位`
+                    },
+                    rawTransaction: response.data
+                }, null, 2)
             }]
         };
     }
 
-    // Return the transaction hash and relevant info for submitted transactions
+    // 已提交的交易详情
+    if (response.hash) {
+        // 添加交易状态检查的标志
+        let statusText = "已提交";
+        let statusIcon = "✅";
+
+        // 如果有success字段（waitForTransaction的结果），检查交易是否真正成功
+        if (response.success === false) {
+            baseResponse.success = false;
+            statusText = "已提交但执行失败";
+            statusIcon = "❌";
+        }
+
+        // 如果有vm_status字段，并且不是"Executed successfully"
+        if (response.vm_status && response.vm_status !== "Executed successfully") {
+            baseResponse.success = false;
+            statusText = `已提交但执行失败: ${response.vm_status}`;
+            statusIcon = "❌";
+        }
+
+        return {
+            ...baseResponse,
+            content: [{
+                type: "text",
+                text: JSON.stringify({
+                    status: "submitted",
+                    message: `${statusIcon} 交易${statusText}`,
+                    transactionHash: response.hash,
+                    explorerLink: `https://${getConfig().aptosNetwork === 'mainnet' ? '' : getConfig().aptosNetwork + '.'}explorer.aptoslabs.com/txn/${response.hash}`,
+                    vmStatus: response.vm_status,
+                    gasUsed: response.gas_used || baseResponse.metadata.gasEstimate
+                }, null, 2)
+            }]
+        };
+    }
+
+    // 默认的响应
     return {
+        ...baseResponse,
         content: [{
             type: "text",
-            text: JSON.stringify({
-                hash: response.hash,
-                success: response.success,
-                vm_status: response.vm_status || "executed",
-                gas_used: response.gas_used || "0",
-                timestamp: response.timestamp || new Date().toISOString(),
-            }, null, 2)
+            text: JSON.stringify(response, null, 2)
         }]
     };
 }
 
 // Helper function to convert error to MCP format
 function formatErrorResponse(error: any): any {
-    console.error("Error in tool handler:", error);
     return {
         content: [{
             type: "text",
@@ -57,144 +119,14 @@ function formatErrorResponse(error: any): any {
     };
 }
 
-// Helper function to handle transaction submission based on execute flag
-async function handleTransactionSubmission(transaction: any, execute: boolean): Promise<any> {
-    // 获取签名服务和可能的签名账户
-    const signingService = getSigningService();
-    const signerAccount = getSignerAccount();
-
-    // 如果设置了执行标志
-    if (execute) {
-        // 如果有直接签名账户可用，使用SDK内置的签名方法
-        if (signerAccount) {
-            const stream = getStreamInstance();
-            const aptosClient = stream.getAptosClient();
-
-            // 使用Aptos SDK的内置签名方法
-            const pendingTxn = await aptosClient.signAndSubmitTransaction({
-                signer: signerAccount,
-                transaction: transaction
-            });
-
-            // 等待交易执行完成
-            const result = await aptosClient.waitForTransaction({
-                transactionHash: pendingTxn.hash
-            });
-
-            return {
-                hash: result.hash,
-                version: result.version || "0",
-                success: result.success !== false, // 默认为true
-                vm_status: result.vm_status || "executed",
-                gas_used: result.gas_used || "0",
-            };
-        }
-        // 否则使用客户端签名服务
-        else if (signingService) {
-            // 检查是否是ClientProvidedSigningService类型
-            const isClientSigning = signingService.constructor.name === 'ClientProvidedSigningService';
-
-            // 如果是客户端签名并且没有签名账户，返回特殊格式以便前端处理
-            if (isClientSigning) {
-                return await signingService.signAndSubmitTransaction(
-                    transaction,
-                    false, // 因为是客户端签名，这里设置为false，只准备交易不执行
-                    undefined // 客户端会提供签名
-                );
-            } else {
-                return await signingService.signAndSubmitTransaction(
-                    transaction,
-                    true, // 执行交易
-                    undefined // 客户端会提供签名
-                );
-            }
-        } else {
-            throw new Error("无法执行交易：既没有配置签名账户，也没有可用的签名服务");
-        }
-    } else {
-        // 如果不执行，只准备交易
-        if (signingService) {
-            return await signingService.signAndSubmitTransaction(
-                transaction,
-                false, // 不执行，只准备
-                undefined
-            );
-        } else {
-            // 如果没有签名服务，直接返回交易对象
-            return transaction;
-        }
-    }
-}
-
-// Helper function to safely convert values to numbers
-function safeToNumber(value: any): number {
-    if (value === null || value === undefined) {
-        return 0; // Return 0 for null/undefined
-    }
-
-    if (typeof value === 'string') {
-        // Try to parse the string as a number
-        const parsed = Number(value);
-        if (isNaN(parsed)) {
-            throw new Error(`Invalid number format: ${value}`);
-        }
-        return parsed;
-    } else if (typeof value === 'number') {
-        // Already a number, just check if it's valid
-        if (isNaN(value)) {
-            throw new Error('Invalid number: NaN');
-        }
-        return value;
-    } else {
-        throw new Error(`Value cannot be converted to a number: ${value}`);
-    }
-}
-
-// Helper function to safely convert values to BigInt
-function safeToBigInt(value: any): bigint {
-    if (value === null || value === undefined) {
-        return BigInt(0); // Return 0 for null/undefined
-    }
-
-    if (typeof value === 'string') {
-        const cleanValue = value.trim();
-        if (!cleanValue) {
-            return BigInt(0); // Return 0 for empty strings
-        }
-
-        try {
-            // If the string has a decimal point, take only the integer part
-            if (cleanValue.includes('.')) {
-                const integerPart = cleanValue.split('.')[0];
-                return BigInt(integerPart || '0');
-            }
-            return BigInt(cleanValue);
-        } catch (error) {
-            console.warn(`Error converting string to BigInt: ${value}. Using 0 instead.`);
-            return BigInt(0);
-        }
-    }
-
-    if (typeof value === 'number') {
-        if (isNaN(value) || !Number.isFinite(value)) {
-            console.warn(`Invalid number for BigInt conversion: ${value}. Using 0 instead.`);
-            return BigInt(0);
-        }
-
-        // Ensure we deal with whole numbers only (BigInt does not support floats)
-        return BigInt(Math.floor(value));
-    }
-
-    if (typeof value === 'bigint') {
-        return value;
-    }
-
-    // For all other types, attempt coercion (e.g., boolean), else default to 0
+// Helper function to handle the AccountAddress version mismatch
+function convertRecipientAddress(address: string): aptos.AccountAddress {
     try {
-        return BigInt(value);
-    } catch (error) {
-        console.warn(`Value of type ${typeof value} cannot be converted to BigInt: ${value}. Using 0 instead.`);
-        return BigInt(0);
+        // 直接使用AccountAddress进行转换
+        return aptos.AccountAddress.fromString(address);
+    } catch (error: any) {
+        console.error("Failed to convert address:", error);
+        throw new Error(`Failed to convert address ${address}: ${error.message}`);
     }
 }
 
@@ -206,15 +138,15 @@ const createStreamInputSchema = z.object({
     isFa: z.boolean().default(false).describe("Whether this is a FA coin (fungible asset)"),
     assetType: z.string().optional().describe("Asset type for FA coins"),
     streamType: z.enum(["TypeStream", "TypePayment"]).describe("Type of stream: TypeStream or TypePayment"),
-    recipient: z.string().describe("Recipient address as a string"),
-    depositAmount: z.string().describe("Amount to deposit (as a string)"),
-    cliffAmount: z.string().default("0").describe("Cliff amount (as a string)"),
-    cliffTime: z.union([z.number(), z.string()]).default(0).describe("Cliff time in seconds since epoch"),
-    startTime: z.union([z.number(), z.string()]).describe("Start time in seconds since epoch"),
-    stopTime: z.union([z.number(), z.string()]).describe("Stop time in seconds since epoch"),
-    interval: z.union([z.number(), z.string()]).describe("Interval in seconds"),
+    recipient: z.string().describe("Recipient address as a string (will be converted to AccountAddress internally)"),
+    depositAmount: z.string().transform(v => BigInt(v)).describe("Amount to deposit (as a string)"),
+    cliffAmount: z.string().default("0").transform(v => BigInt(v)).describe("Cliff amount (as a string)"),
+    cliffTime: z.union([z.string(), z.number()]).default(0).transform(v => typeof v === 'string' ? BigInt(v) : BigInt(v)).describe("Cliff time in seconds since epoch"),
+    startTime: z.union([z.string(), z.number()]).transform(v => typeof v === 'string' ? BigInt(v) : BigInt(v)).describe("Start time in seconds since epoch"),
+    stopTime: z.union([z.string(), z.number()]).transform(v => typeof v === 'string' ? BigInt(v) : BigInt(v)).describe("Stop time in seconds since epoch"),
+    interval: z.union([z.string(), z.number()]).transform(v => typeof v === 'string' ? BigInt(v) : BigInt(v)).describe("Interval in seconds"),
     autoWithdraw: z.boolean().default(false).describe("Whether to auto withdraw"),
-    autoWithdrawInterval: z.union([z.number(), z.string()]).optional().describe("Auto withdraw interval in seconds"),
+    autoWithdrawInterval: z.union([z.string(), z.number()]).default(0).transform(v => typeof v === 'string' ? BigInt(v) : BigInt(v)).describe("Auto withdraw interval in seconds"),
     pauseable: z.enum(["Sender", "Recipient", "Both"]).describe("Who can pause: Sender, Recipient, or Both"),
     closeable: z.enum(["Sender", "Recipient", "Both"]).describe("Who can close: Sender, Recipient, or Both"),
     recipientModifiable: z.enum(["Sender", "Recipient", "Both"]).describe("Who can modify recipient: Sender, Recipient, or Both"),
@@ -238,7 +170,7 @@ const closeStreamInputSchema = z.object({
 
 const extendStreamInputSchema = z.object({
     streamId: z.string().describe("ID of the stream to extend"),
-    extendTime: z.union([z.number(), z.string()]).describe("New stop time in seconds since epoch"),
+    extendTime: z.number().describe("New stop time in seconds since epoch"),
     coinType: z.string().optional().describe("Type of coin for non-FA streams"),
     isFa: z.boolean().default(false).describe("Whether this is a FA coin stream"),
     execute: z.boolean().default(false).describe("Whether to execute the transaction or just create it"),
@@ -268,15 +200,15 @@ const batchCreateStreamInputSchema = z.object({
     isFa: z.boolean().default(false).describe("Whether this is a FA coin stream"),
     assetType: z.string().optional().describe("Asset type for FA coins"),
     streamType: z.enum(["TypeStream", "TypePayment"]).describe("Type of stream: TypeStream or TypePayment"),
-    recipients: z.array(z.string()).describe("Recipient addresses as strings"),
-    depositAmounts: z.array(z.string()).describe("Amounts to deposit (as strings)"),
-    cliffAmounts: z.array(z.string()).optional().describe("Cliff amounts (as strings)"),
-    cliffTime: z.union([z.number(), z.string()]).default(0).describe("Cliff time in seconds since epoch"),
-    startTime: z.union([z.number(), z.string()]).describe("Start time in seconds since epoch"),
-    stopTime: z.union([z.number(), z.string()]).describe("Stop time in seconds since epoch"),
-    interval: z.union([z.number(), z.string()]).describe("Interval in seconds"),
+    recipients: z.array(z.string()).describe("Recipient addresses as strings (will be converted to AccountAddress internally)"),
+    depositAmounts: z.array(z.number()).describe("Amounts to deposit"),
+    cliffAmounts: z.array(z.number()).optional().describe("Cliff amounts"),
+    cliffTime: z.number().default(0).describe("Cliff time in seconds since epoch"),
+    startTime: z.number().describe("Start time in seconds since epoch"),
+    stopTime: z.number().describe("Stop time in seconds since epoch"),
+    interval: z.number().describe("Interval in seconds"),
     autoWithdraw: z.boolean().default(false).describe("Whether to auto withdraw"),
-    autoWithdrawInterval: z.union([z.number(), z.string()]).optional().describe("Auto withdraw interval in seconds"),
+    autoWithdrawInterval: z.number().optional().describe("Auto withdraw interval in seconds"),
     pauseable: z.enum(["Sender", "Recipient", "Both"]).describe("Who can pause: Sender, Recipient, or Both"),
     closeable: z.enum(["Sender", "Recipient", "Both"]).describe("Who can close: Sender, Recipient, or Both"),
     recipientModifiable: z.enum(["Sender", "Recipient", "Both"]).describe("Who can modify recipient: Sender, Recipient, or Both"),
@@ -322,35 +254,33 @@ const createStreamTool = {
                 "Both": OperateUser.Both
             };
 
-            // Create stream params using SDK best practices
+            // Use string address directly
+            const recipientAddress = convertRecipientAddress(args.recipient);
+            // Create stream params
             const params = new CreateStreamParams({
-                // execute标志设置为false，因为我们将使用handleTransactionSubmission来控制执行
-                execute: false,
+                execute: args.execute,
                 coin_type: args.isFa ? undefined : args.coinType,
                 asset_type: args.isFa ? args.assetType : undefined,
                 _remark: args.remark,
                 name: args.name,
                 is_fa: args.isFa,
                 stream_type: streamTypeMap[args.streamType],
-                recipient: aptos.AccountAddress.fromString(args.recipient),
-                deposit_amount: safeToBigInt(args.depositAmount),
-                cliff_amount: safeToBigInt(args.cliffAmount),
-                cliff_time: safeToNumber(args.cliffTime), // 确保时间参数为数字类型
-                start_time: safeToNumber(args.startTime), // 确保时间参数为数字类型
-                stop_time: safeToNumber(args.stopTime),   // 确保时间参数为数字类型
-                interval: safeToNumber(args.interval),    // 确保时间参数为数字类型
-                auto_withdraw: Boolean(args.autoWithdraw), // 确保是布尔值类型
-                auto_withdraw_interval: args.autoWithdrawInterval ? safeToNumber(args.autoWithdrawInterval) : 0,
+                recipient: recipientAddress,
+                deposit_amount: args.depositAmount ? Number(args.depositAmount.toString()) : 0,
+                cliff_amount: args.cliffAmount ? Number(args.cliffAmount.toString()) : 0,
+                start_time: args.startTime ? Number(args.startTime.toString()) : 0,
+                stop_time: args.stopTime ? Number(args.stopTime.toString()) : 0,
+                interval: args.interval ? Number(args.interval.toString()) : 0,
+                cliff_time: args.cliffTime ? Number(args.cliffTime.toString()) : 0,
+                auto_withdraw: args.autoWithdraw,
+                auto_withdraw_interval: args.autoWithdrawInterval ? Number(args.autoWithdrawInterval.toString()) : 0,
                 pauseable: operateUserMap[args.pauseable],
                 closeable: operateUserMap[args.closeable],
                 recipient_modifiable: operateUserMap[args.recipientModifiable],
             });
 
-            // 创建流参数并获取交易对象
-            const transaction = await stream.createStream(params);
-
-            // 使用我们的辅助函数处理交易提交
-            const response = await handleTransactionSubmission(transaction, args.execute);
+            // Create the stream
+            const response = await stream.createStream(params);
 
             return formatTransactionResponse(response);
         } catch (error: any) {
@@ -381,18 +311,15 @@ const withdrawStreamTool = {
             const params = new StreamOperateParams({
                 stream_id: args.streamId,
                 coin_type: args.isFa ? undefined : args.coinType,
-                execute: false, // 设置为false，让我们通过handleTransactionSubmission控制执行
+                execute: args.execute,
                 is_fa: args.isFa,
             });
 
             // Set the operate type to withdraw
             params.setOperateType(OperateType.Claim);
 
-            // 获取交易对象
-            const transaction = await stream.withdrawStream(params);
-
-            // 使用我们的辅助函数处理交易提交
-            const response = await handleTransactionSubmission(transaction, args.execute);
+            // Withdraw from the stream
+            const response = await stream.withdrawStream(params);
 
             return formatTransactionResponse(response);
         } catch (error: any) {
@@ -423,15 +350,12 @@ const closeStreamTool = {
             const params = new StreamOperateParams({
                 stream_id: args.streamId,
                 coin_type: args.isFa ? undefined : args.coinType,
-                execute: false, // 设置为false，让我们通过handleTransactionSubmission控制执行
+                execute: args.execute,
                 is_fa: args.isFa,
             });
 
-            // 获取交易对象
-            const transaction = await stream.closeStream(params);
-
-            // 使用我们的辅助函数处理交易提交
-            const response = await handleTransactionSubmission(transaction, args.execute);
+            // Close the stream
+            const response = await stream.closeStream(params);
 
             return formatTransactionResponse(response);
         } catch (error: any) {
@@ -462,19 +386,16 @@ const extendStreamTool = {
             const params = new StreamOperateParams({
                 stream_id: args.streamId,
                 coin_type: args.isFa ? undefined : args.coinType,
-                execute: false, // 设置为false，让我们通过handleTransactionSubmission控制执行
+                execute: args.execute,
                 is_fa: args.isFa,
-                extend_time: safeToNumber(args.extendTime),
+                extend_time: args.extendTime,
             });
 
             // Set the operate type to extend
             params.setOperateType(OperateType.Extend);
 
-            // 获取交易对象
-            const transaction = await stream.extendStream(params);
-
-            // 使用辅助函数处理交易提交
-            const response = await handleTransactionSubmission(transaction, args.execute);
+            // Extend the stream
+            const response = await stream.extendStream(params);
 
             return formatTransactionResponse(response);
         } catch (error: any) {
@@ -505,15 +426,12 @@ const pauseStreamTool = {
             const params = new StreamOperateParams({
                 stream_id: args.streamId,
                 coin_type: args.isFa ? undefined : args.coinType,
-                execute: false, // 设置为false，让我们通过handleTransactionSubmission控制执行
+                execute: args.execute,
                 is_fa: args.isFa,
             });
 
-            // 获取交易对象
-            const transaction = await stream.pauseStream(params);
-
-            // 使用辅助函数处理交易提交
-            const response = await handleTransactionSubmission(transaction, args.execute);
+            // Pause the stream
+            const response = await stream.pauseStream(params);
 
             return formatTransactionResponse(response);
         } catch (error: any) {
@@ -544,15 +462,12 @@ const resumeStreamTool = {
             const params = new StreamOperateParams({
                 stream_id: args.streamId,
                 coin_type: args.isFa ? undefined : args.coinType,
-                execute: false, // 设置为false，让我们通过handleTransactionSubmission控制执行
+                execute: args.execute,
                 is_fa: args.isFa,
             });
 
-            // 获取交易对象
-            const transaction = await stream.resumeStream(params);
-
-            // 使用辅助函数处理交易提交
-            const response = await handleTransactionSubmission(transaction, args.execute);
+            // Resume the stream
+            const response = await stream.resumeStream(params);
 
             return formatTransactionResponse(response);
         } catch (error: any) {
@@ -624,10 +539,14 @@ const batchCreateStreamTool = {
                 "Both": OperateUser.Both
             };
 
-            // Handle cliff amounts properly
-            const cliffAmounts = args.cliffAmounts || args.depositAmounts.map(() => "0");
+            // Simplified address handling - use string array directly
+            // Use string addresses directly
+            const recipientAddresses = args.recipients.map(address => convertRecipientAddress(address));
+            // Convert cliffAmounts to BigInt[], ensuring it's compatible with AnyNumber[]
+            const cliffAmounts = (args.cliffAmounts || args.depositAmounts.map(() => "0"))
+                .map(amount => typeof amount === "string" ? BigInt(amount) : BigInt(amount));
 
-            // Create batch params using SDK best practices
+            // Create batch params
             const params = new BatchCreateParams({
                 names: args.names,
                 coin_type: args.isFa ? undefined : args.coinType,
@@ -635,27 +554,23 @@ const batchCreateStreamTool = {
                 _remark: args.remark,
                 is_fa: args.isFa,
                 stream_type: streamTypeMap[args.streamType],
-                recipients: args.recipients.map(recipient => aptos.AccountAddress.fromString(recipient)), // 转换字符串地址为AccountAddress对象
-                deposit_amounts: args.depositAmounts.map(amount => safeToBigInt(amount)),
-                cliff_amounts: cliffAmounts.map(amount => safeToBigInt(amount)),
-                cliff_time: safeToNumber(args.cliffTime),
-                start_time: safeToNumber(args.startTime),
-                stop_time: safeToNumber(args.stopTime),
-                interval: safeToNumber(args.interval),
-                auto_withdraw: Boolean(args.autoWithdraw), // 确保是布尔值类型
-                auto_withdraw_interval: args.autoWithdrawInterval ? safeToNumber(args.autoWithdrawInterval) : 0,
+                recipients: recipientAddresses,
+                deposit_amounts: args.depositAmounts.map(amount => Number(amount)),
+                cliff_amounts: cliffAmounts.map(amount => Number(amount)),
+                cliff_time: args.cliffTime ? Number(args.cliffTime) : 0,
+                start_time: args.startTime ? Number(args.startTime) : 0,
+                stop_time: args.stopTime ? Number(args.stopTime) : 0,
+                interval: args.interval ? Number(args.interval) : 0,
+                auto_withdraw: args.autoWithdraw || false,
+                auto_withdraw_interval: args.autoWithdrawInterval ? Number(args.autoWithdrawInterval) : (args.interval ? Number(args.interval) : 0),
                 pauseable: operateUserMap[args.pauseable],
                 closeable: operateUserMap[args.closeable],
                 recipient_modifiable: operateUserMap[args.recipientModifiable],
-                execute: false, // 设置为false，让我们通过handleTransactionSubmission控制执行
+                execute: args.execute,
             });
 
-            // 调用SDK批量创建流的方法获取交易对象
-            // 注意：SDK中的方法名是batchCreateSteam（注意拼写），不是batchCreateStream
-            const transaction = await stream.batchCreateSteam(params);
-
-            // 使用辅助函数处理交易提交
-            const response = await handleTransactionSubmission(transaction, args.execute);
+            // Create the batch of streams
+            const response = await stream.batchCreateSteam(params);
 
             return formatTransactionResponse(response);
         } catch (error: any) {
@@ -687,15 +602,12 @@ const batchWithdrawStreamTool = {
                 stream_ids: args.streamIds,
                 coin_type: args.isFa ? undefined : args.coinType,
                 asset_type: args.isFa ? args.assetType : undefined,
-                execute: false, // 设置为false，让我们通过handleTransactionSubmission控制执行
+                execute: args.execute,
                 is_fa: args.isFa,
             });
 
-            // 获取交易对象
-            const transaction = await stream.batchWithdrawStream(params);
-
-            // 使用辅助函数处理交易提交
-            const response = await handleTransactionSubmission(transaction, args.execute);
+            // Batch withdraw from the streams
+            const response = await stream.batchWithdrawStream(params);
 
             return formatTransactionResponse(response);
         } catch (error: any) {
@@ -704,16 +616,10 @@ const batchWithdrawStreamTool = {
     }
 };
 
-// 从transactionTools中解构出需要的工具
-const {
-    submitSignedTransactionTool,
-    checkPendingTransactionTool
-} = transactionTools.reduce((acc: any, tool: any) => {
-    acc[tool.name.replace(/-/g, '') + 'Tool'] = tool;
-    return acc;
-}, {});
+// Import transaction tools - use correct import syntax
+import { submitSignedTransactionTool, checkPendingTransactionTool } from "./tools/transactionTools.js";
 
-// Combine all tools into an array
+// 将所有工具放入一个数组
 const allTools = [
     createStreamTool,
     withdrawStreamTool,
@@ -724,10 +630,11 @@ const allTools = [
     getStreamInfoTool,
     batchCreateStreamTool,
     batchWithdrawStreamTool,
-    ...transactionTools // 只包含一次，避免重复
+    submitSignedTransactionTool,
+    checkPendingTransactionTool
 ];
 
-// Export tools
+// 统一导出工具
 export {
     createStreamTool,
     withdrawStreamTool,
@@ -740,9 +647,9 @@ export {
     batchWithdrawStreamTool,
     submitSignedTransactionTool,
     checkPendingTransactionTool,
-    // Export tool array
+    // 导出工具数组
     allTools as tools
 };
 
-// Default export all tools
+// 默认导出工具数组
 export default allTools;

@@ -11,10 +11,33 @@ try {
 }
 
 // Network configuration
-interface AptosConfig {
+class AptosConfig {
     aptosNetwork: 'mainnet' | 'testnet' | 'devnet' | 'local';
     aptosNodeUrl: string;
     aptosFaucetUrl?: string;
+
+    constructor() {
+        this.aptosNetwork = (process.env.APTOS_NETWORK || 'testnet') as 'testnet';
+        this.aptosNodeUrl = process.env.APTOS_NODE_URL || this.getDefaultNodeUrl();
+        this.aptosFaucetUrl = process.env.APTOS_FAUCET_URL;
+    }
+
+    private getDefaultNodeUrl(): string {
+        switch (this.aptosNetwork) {
+            case 'mainnet': return 'https://fullnode.mainnet.aptoslabs.com';
+            case 'testnet': return 'https://fullnode.testnet.aptoslabs.com';
+            case 'devnet': return 'https://fullnode.devnet.aptoslabs.com';
+            case 'local': return 'http://localhost:8080';
+            default: return 'https://fullnode.testnet.aptoslabs.com';
+        }
+    }
+
+    logConfig() {
+        console.log('=== 网络配置 ===');
+        console.log(`网络类型: ${this.aptosNetwork}`);
+        console.log(`节点URL: ${this.aptosNodeUrl}`);
+        console.log(`水龙头URL: ${this.aptosFaucetUrl || '未配置'}`);
+    }
 }
 
 // Transaction executor configuration - 基于客户端签名的安全架构
@@ -30,22 +53,7 @@ interface TransactionExecutorConfig {
 
 // Get the Aptos network configuration
 export function getConfig(): AptosConfig {
-    // Read from environment variables
-    const aptosNetwork = process.env.APTOS_NETWORK || 'mainnet';
-    const aptosNodeUrl = process.env.APTOS_NODE_URL || 'https://fullnode.mainnet.aptoslabs.com/v1';
-    const aptosFaucetUrl = process.env.APTOS_FAUCET_URL;
-
-    // Validate network
-    if (!['mainnet', 'testnet', 'devnet', 'local'].includes(aptosNetwork)) {
-        throw new Error(`Invalid APTOS_NETWORK: ${aptosNetwork}. Must be one of: mainnet, testnet, devnet, local`);
-    }
-
-    // Return the configuration
-    return {
-        aptosNetwork: aptosNetwork as 'mainnet' | 'testnet' | 'devnet' | 'local',
-        aptosNodeUrl,
-        aptosFaucetUrl
-    };
+    return new AptosConfig();
 }
 
 // 获取交易执行配置

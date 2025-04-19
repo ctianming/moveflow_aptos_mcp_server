@@ -1,6 +1,6 @@
 {
   "name": "@amyseer/moveflow-aptos-mcp-server",
-  "version": "1.0.6",
+  "version": "1.0.13",
   "type": "module",
   "description": "MoveFlow Aptos MCP Server for AI assistants to interact with MoveFlow protocol on Aptos blockchain",
   "main": "build/index.js",
