@@ -1,6 +1,6 @@
 {
   "name": "@amyseer/moveflow-aptos-mcp-server",
-  "version": "1.0.13",
+  "version": "1.0.15",
   "type": "module",
   "description": "MoveFlow Aptos MCP Server for AI assistants to interact with MoveFlow protocol on Aptos blockchain",
   "main": "build/index.js",
@@ -23,6 +23,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.7.0",
     "@moveflow/aptos-sdk": "^0.0.12",
+    "chalk": "^5.4.1",
     "dotenv": "^16.4.0",
     "zod": "^3.22.4"
   },

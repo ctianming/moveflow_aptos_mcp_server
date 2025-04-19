@@ -14,9 +14,13 @@ import { aptos } from "@moveflow/aptos-sdk";
 import { getConfig, getTransactionExecutorConfig } from "./config.js";
 import { helper } from "@moveflow/aptos-sdk";
 import { canExecuteTransaction } from "./utils.js";
+import { serialize, deserialize } from "./utils.js";
 
 // 增强版交易响应格式化函数
 function formatTransactionResponse(response: any, params?: any): any {
+    // 首先确保任何BigInt值都被转为字符串
+    response = safeSerialize(response);
+
     const baseResponse = {
         success: !!response,
         timestamp: new Date().toISOString(),
@@ -41,25 +45,8 @@ function formatTransactionResponse(response: any, params?: any): any {
 
     // 未执行的交易预览
     if (response.data && !response.hash) {
-        return {
-            ...baseResponse,
-            content: [{
-                type: "text",
-                text: JSON.stringify({
-                    status: "pending",
-                    message: "✅ 交易已创建但未执行 (设置 execute: true 提交到链上)",
-                    preview: {
-                        streamName: params?.name,
-                        recipient: params?.recipient?.toString(),
-                        totalAmount: params?.deposit_amount?.toString() + ' APT',
-                        duration: `${(params?.stop_time - params?.start_time) / 86400} 天`,
-                        autoWithdraw: params?.auto_withdraw ? '启用' : '禁用',
-                        gasEstimate: `${baseResponse.metadata.gasEstimate} gas单位`
-                    },
-                    rawTransaction: response.data
-                }, null, 2)
-            }]
-        };
+        const formattedPreview = formatPreviewTransaction(response, params, baseResponse);
+        return formattedPreview;
     }
 
     // 已提交的交易详情
@@ -82,6 +69,8 @@ function formatTransactionResponse(response: any, params?: any): any {
             statusIcon = "❌";
         }
 
+        const explorerLink = `https://${getConfig().aptosNetwork === 'mainnet' ? '' : getConfig().aptosNetwork + '.'}explorer.aptoslabs.com/txn/${response.hash}`;
+
         return {
             ...baseResponse,
             content: [{
@@ -90,7 +79,7 @@ function formatTransactionResponse(response: any, params?: any): any {
                     status: "submitted",
                     message: `${statusIcon} 交易${statusText}`,
                     transactionHash: response.hash,
-                    explorerLink: `https://${getConfig().aptosNetwork === 'mainnet' ? '' : getConfig().aptosNetwork + '.'}explorer.aptoslabs.com/txn/${response.hash}`,
+                    explorerLink: explorerLink,
                     vmStatus: response.vm_status,
                     gasUsed: response.gas_used || baseResponse.metadata.gasEstimate
                 }, null, 2)
@@ -106,6 +95,114 @@ function formatTransactionResponse(response: any, params?: any): any {
             text: JSON.stringify(response, null, 2)
         }]
     };
+}
+
+// 格式化交易预览
+function formatPreviewTransaction(response: any, params?: any, baseResponse?: any): any {
+    if (!baseResponse) {
+        baseResponse = {
+            success: true,
+            timestamp: new Date().toISOString(),
+            metadata: {
+                network: getConfig().aptosNetwork,
+                gasEstimate: response?.gasUsed || 0,
+                transactionType: 'stream_create'
+            }
+        };
+    }
+
+    // 计算流时长（天）
+    let duration = "未知";
+    if (params?.stop_time && params?.start_time) {
+        const durationSeconds = Number(params.stop_time) - Number(params.start_time);
+        const days = Math.floor(durationSeconds / 86400);
+        const hours = Math.floor((durationSeconds % 86400) / 3600);
+        const minutes = Math.floor((durationSeconds % 3600) / 60);
+
+        if (days > 0) {
+            duration = `${days}天`;
+            if (hours > 0) duration += ` ${hours}小时`;
+        } else if (hours > 0) {
+            duration = `${hours}小时`;
+            if (minutes > 0) duration += ` ${minutes}分钟`;
+        } else {
+            duration = `${minutes}分钟`;
+        }
+    }
+
+    // 格式化金额
+    let amount = "未知";
+    if (params?.deposit_amount) {
+        // 将数值转换为APT单位（除以100000000）
+        try {
+            const amountInApt = Number(params.deposit_amount) / 100000000;
+            amount = `${amountInApt.toLocaleString()} APT`;
+        } catch {
+            amount = `${params.deposit_amount} octa`;
+        }
+    }
+
+    // 格式化开始和结束时间
+    let startTime = "未设置";
+    let endTime = "未设置";
+    if (params?.start_time) {
+        startTime = new Date(Number(params.start_time) * 1000).toLocaleString();
+    }
+    if (params?.stop_time) {
+        endTime = new Date(Number(params.stop_time) * 1000).toLocaleString();
+    }
+
+    return {
+        ...baseResponse,
+        content: [{
+            type: "text",
+            text: JSON.stringify({
+                status: "pending",
+                message: "✅ 交易已创建但未执行 (设置 execute: true 提交到链上)",
+                preview: {
+                    streamName: params?.name || "未命名",
+                    recipient: params?.recipient ? params?.recipient.toString() : "未设置",
+                    totalAmount: amount,
+                    duration: duration,
+                    startTime: startTime,
+                    endTime: endTime,
+                    autoWithdraw: params?.auto_withdraw ? '启用' : '禁用',
+                    gasEstimate: `${baseResponse.metadata.gasEstimate} gas单位`
+                }
+            }, null, 2)
+        }]
+    };
+}
+
+// 安全序列化函数，处理BigInt和其他特殊值
+function safeSerialize(obj: any): any {
+    if (obj === null || obj === undefined) {
+        return obj;
+    }
+
+    // 如果是BigInt，转换为字符串
+    if (typeof obj === 'bigint') {
+        return obj.toString();
+    }
+
+    // 如果是数组，递归处理数组中的每个元素
+    if (Array.isArray(obj)) {
+        return obj.map(item => safeSerialize(item));
+    }
+
+    // 如果是对象，递归处理对象的每个属性
+    if (typeof obj === 'object') {
+        const result: any = {};
+        for (const key in obj) {
+            if (Object.prototype.hasOwnProperty.call(obj, key)) {
+                result[key] = safeSerialize(obj[key]);
+            }
+        }
+        return result;
+    }
+
+    // 其他基本类型直接返回
+    return obj;
 }
 
 // Helper function to convert error to MCP format
